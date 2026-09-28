@@ -3,9 +3,9 @@
 // ========================================================================
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
-import { getModels, getAuthStorage, subProviderName, type SubEntry, type MultiAuthConfig, type ProjectConfig, type EffectiveConfig, type AuthStorageEntry } from "./core.ts";
+import { getModels, getAuthStorage, adaptAuthStorage, subProviderName, type SubEntry, type MultiAuthConfig, type ProjectConfig, type EffectiveConfig, type AuthStorageEntry, type AuthStorage } from "./core.ts";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { PROVIDER_TEMPLATES, SUPPORTED_PROVIDERS, getBaseProvider, subDisplayName } from "./providers.ts";
 
@@ -271,7 +271,8 @@ export function normalizeEntries(entries: SubEntry[]): SubEntry[] {
 }
 
 export function subAccountIdentifier(authStorage: AuthStorage, providerName: string): string | undefined {
-	const auth = authStorage.get(providerName) as AuthStorageEntry | undefined;
+	const storage = adaptAuthStorage(authStorage);
+	const auth = storage.get(providerName) as AuthStorageEntry | undefined;
 	for (const value of [auth?.email, auth?.accountId]) {
 		if (typeof value !== "string") continue;
 		const identifier = value.trim();
@@ -280,9 +281,10 @@ export function subAccountIdentifier(authStorage: AuthStorage, providerName: str
 	return undefined;
 }
 export function formatSubscriptionStatus(entry: SubEntry, authStorage: AuthStorage): string {
+	const storage = adaptAuthStorage(authStorage);
 	const providerName = subProviderName(entry);
-	if (!authStorage.hasAuth(providerName)) return "not logged in";
-	const identifier = subAccountIdentifier(authStorage, providerName);
+	if (!storage.hasAuth(providerName)) return "not logged in";
+	const identifier = subAccountIdentifier(storage, providerName);
 	return identifier ? `logged in ${identifier}` : "logged in";
 }
 
@@ -299,10 +301,11 @@ export function formatSubscriptionMeta(
 	config: MultiAuthConfig,
 	authStorage: AuthStorage,
 ): string {
+	const storage = adaptAuthStorage(authStorage);
 	const name = subProviderName(entry);
-	const hasAuth = authStorage.hasAuth(name);
+	const hasAuth = storage.hasAuth(name);
 	const status = hasAuth ? "[logged in]" : "[not logged in]";
-	const identifier = hasAuth ? subAccountIdentifier(authStorage, name) : undefined;
+	const identifier = hasAuth ? subAccountIdentifier(storage, name) : undefined;
 	const source = getSubscriptionSource(config, entry);
 	return `${status}${identifier ? ` ${identifier}` : ""} (${source})`;
 }

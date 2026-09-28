@@ -1,11 +1,11 @@
 // ========================================================================
 // Built-in quota checking
 // ========================================================================
-import type { ExtensionCommandContext, ExtensionContext, AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { BorderedLoader } from "@oh-my-pi/pi-coding-agent";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getBaseProvider, subDisplayName, PROVIDER_TEMPLATES } from "./providers.ts";
-import { getAuthStorage, getModels, subProviderName, type AuthStorageEntry, type MultiAuthConfig, type QuotaAccount, type QuotaCheckResult, type QuotaStatusKind, type ProviderQuotaChecker } from "./core.ts";
+import { getAuthStorage, adaptAuthStorage, getModels, subProviderName, type AuthStorageEntry, type MultiAuthConfig, type QuotaAccount, type QuotaCheckResult, type QuotaStatusKind, type ProviderQuotaChecker, type AuthStorage } from "./core.ts";
 import { loadGlobalConfig, loadProjectConfig, parseEnvConfig, mergeConfigs, normalizeEntries } from "./config.ts";
 import { getWrappedSelectIndex, showWrappedSelect } from "./ui.ts";
 import type { SelectItem } from "@oh-my-pi/pi-tui";
@@ -738,7 +738,10 @@ export async function resolveGoogleQuotaAccess(
 		return { accessToken: auth.access!, projectId };
 	}
 
-	const access = await authStorage.getOAuthAccess(account.providerName, undefined, { signal });
+	const storage = adaptAuthStorage(authStorage);
+	const access = await (typeof storage.getOAuthAccess === "function"
+		? storage.getOAuthAccess(account.providerName, undefined, { signal })
+		: undefined);
 	if (!access) {
 		throw new Error("Unable to refresh Google OAuth credentials. Log in again.");
 	}
@@ -982,6 +985,7 @@ export function normalizeQuotaAllowedProviderNames(cwd: string): string[] | unde
 }
 
 export function collectQuotaAccounts(ctx: ExtensionContext, authStorage: AuthStorage): QuotaAccount[] {
+	const storage = adaptAuthStorage(authStorage);
 	const config = loadGlobalConfig();
 	const envEntries = parseEnvConfig();
 	const allSubs = normalizeEntries(mergeConfigs(config, envEntries));
@@ -997,12 +1001,12 @@ export function collectQuotaAccounts(ctx: ExtensionContext, authStorage: AuthSto
 			providerName,
 			baseProvider: getBaseProvider(providerName) || providerName,
 			displayName,
-			auth: authStorage.get(providerName) as AuthStorageEntry | undefined,
+			auth: storage.get(providerName) as AuthStorageEntry | undefined,
 		});
 	};
 
 	for (const checker of PROVIDER_QUOTA_CHECKERS) {
-		if (authStorage.hasAuth(checker.baseProvider)) {
+		if (storage.hasAuth(checker.baseProvider)) {
 			pushAccount(
 				checker.baseProvider,
 				PROVIDER_TEMPLATES[checker.baseProvider]?.displayName || checker.baseProvider,

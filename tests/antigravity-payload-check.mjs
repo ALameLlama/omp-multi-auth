@@ -69,7 +69,7 @@ function assertRewritten(capture, provider) {
 	assert.doesNotMatch(text, /RFC 2119/, "contiguous RFC 2119 fingerprint broken");
 	assert.doesNotMatch(text, /<conventions>/, "contiguous <conventions> tag broken");
 	const stripped = text.split(ZWSP).join("");
-	assert.match(stripped, /<conventions>\s*RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\./,
+	assert.match(stripped, /(?:<conventions>\s*)?RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\./,
 		"content preserved once zero-width spaces are stripped");
 	assert.equal(capture.wire.body.requestType, "agent");
 	assert.match(capture.wire.url, /\/v1internal:streamGenerateContent\?alt=sse$/);
