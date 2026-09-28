@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const agentDir = mkdtempSync(join(tmpdir(), "omp-multi-auth-minimax-"));
+const agentDir = mkdtempSync(join(tmpdir(), "omp-multi-auth-apikey-"));
 
 try {
 
@@ -21,7 +21,6 @@ try {
 			input: '{"id":"bootstrap","type":"get_available_models"}\n',
 			encoding: "utf8",
 			maxBuffer: 64 * 1024 * 1024,
-			timeout: 30_000,
 		},
 	);
 	assert.equal(bootstrap.error, undefined, bootstrap.error?.message);
@@ -32,8 +31,8 @@ try {
 		"INSERT INTO auth_credentials (provider, credential_type, data, identity_key) VALUES (?, 'api_key', ?, NULL)",
 	);
 	for (const [provider, key] of [
-		["minimax-2", "test-global"],
-		["minimax-cn-2", "test-china"],
+		["openai-2", "test-openai-key"],
+		["deepseek-2", "test-deepseek-key"],
 	]) {
 		insert.run(provider, JSON.stringify({ key }));
 	}
@@ -50,7 +49,7 @@ try {
 			env: {
 				...process.env,
 				PI_CODING_AGENT_DIR: agentDir,
-				MULTI_SUB: "minimax:1,minimax-cn:1",
+				MULTI_SUB: "openai:1,deepseek:1",
 			},
 			timeout: 30_000,
 		},
@@ -58,14 +57,12 @@ try {
 	const stdout = [];
 	const stderr = [];
 	child.stderr.on("data", (chunk) => stderr.push(chunk));
-	const events = [];
 	const waiters = [];
 	const lines = createInterface({ input: child.stdout });
 	lines.on("line", (line) => {
 		stdout.push(line);
 		try {
 			const event = JSON.parse(line);
-			events.push(event);
 			for (let i = waiters.length - 1; i >= 0; i--) {
 				if (!waiters[i].matches(event)) continue;
 				waiters.splice(i, 1)[0].resolve(event);
@@ -74,33 +71,42 @@ try {
 			// Ignore non-JSON protocol noise or incomplete lines.
 		}
 	});
-	const waitFor = (matches) => new Promise((resolve, reject) => waiters.push({ matches, resolve, reject }));
+	const waitFor = (matches) => new Promise((resolve) => waiters.push({ matches, resolve }));
 	const send = async (request) => {
 		const response = waitFor((event) => event.id === request.id);
 		child.stdin.write(`${JSON.stringify(request)}\n`);
 		return response;
 	};
-	const response = await send({ id: "models", type: "get_available_models" });
+
+	const modelsResponse = await send({ id: "models", type: "get_available_models" });
+	const providersResponse = await send({ id: "login-providers", type: "get_login_providers" });
 	child.stdin.end();
 	const exitCode = await new Promise((resolve) => child.once("close", resolve));
 	const rawStdout = stdout.join("\n");
 	const rawStderr = Buffer.concat(stderr).toString();
 	assert.equal(exitCode, 0, rawStderr);
 	assert.doesNotMatch(rawStdout, /"type":"extension_error"/, rawStdout);
-	assert.equal(response.command, "get_available_models");
-	assert.equal(response.success, true);
+	assert.equal(modelsResponse.command, "get_available_models");
+	assert.equal(modelsResponse.success, true);
+	assert.equal(providersResponse.command, "get_login_providers");
+	assert.equal(providersResponse.success, true);
 
-	const models = response.data.models;
 	for (const [provider, baseUrl] of [
-		["minimax-2", "https://api.minimax.io/anthropic"],
-		["minimax-cn-2", "https://api.minimaxi.com/anthropic"],
+		["openai-2", "https://api.openai.com/v1"],
+		["deepseek-2", "https://api.deepseek.com"],
 	]) {
-		const providerModels = models.filter((model) => model.provider === provider);
+		const providerModels = modelsResponse.data.models.filter((model) => model.provider === provider);
 		assert.ok(providerModels.length > 0, `missing models for ${provider}`);
 		assert.ok(providerModels.every((model) => model.baseUrl === baseUrl));
 		console.log(`${provider} models: ${providerModels.length}`);
 	}
-	console.log("MiniMax provider check passed");
+
+	const providers = providersResponse.data.providers ?? providersResponse.data;
+	assert.ok(Array.isArray(providers), "login providers response must contain an array");
+	const providerIds = providers.map((provider) => typeof provider === "string" ? provider : provider.id);
+	assert.ok(providerIds.includes("openai-2"), "missing openai-2 login provider");
+	assert.ok(providerIds.includes("deepseek-2"), "missing deepseek-2 login provider");
+	console.log("API-key provider check passed");
 } finally {
 	rmSync(agentDir, { recursive: true, force: true });
 }

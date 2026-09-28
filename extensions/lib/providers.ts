@@ -74,6 +74,21 @@ export function flowBackedOAuth(providerId: string, name: string): ProviderOAuth
 	};
 }
 
+export function buildApiKeyOAuth(displayName: string, index: number, placeholder: string): ProviderOAuth {
+	return {
+		name: `${displayName} #${index}`,
+		async login(callbacks: OAuthLoginCallbacks): Promise<string> {
+			const key = (await callbacks.onPrompt({
+				message: `Paste your ${displayName} API key:`,
+				placeholder,
+			})).trim();
+			if (!key) throw new Error(`No API key entered for ${displayName} #${index}`);
+			return key; // string return -> OMP stores {type:"api_key", key} under this provider
+		},
+	};
+}
+
+
 
 // GitHub Copilot base URL derivation, ported from the pi-ai OAuth flow
 // (no longer part of the public pi-ai surface).
@@ -216,10 +231,34 @@ export function getSubscriptionStream(baseProvider: string): SubscriptionStream 
 
 export interface ProviderTemplate {
 	displayName: string;
-	apiKey?: string;
 	buildOAuth?(index: number): ProviderOAuth;
 	buildModifyModels?(providerName: string): ProviderOAuth["modifyModels"];
 }
+
+interface ApiKeyProviderSpec {
+	id: string; // bundled-catalog provider id
+	displayName: string;
+	placeholder: string; // key-format hint shown in the login prompt
+}
+
+// Direct-API-key providers with a static baseUrl and bearer auth in the bundled
+// catalog. Add a row to support another; no other code changes are required.
+export const API_KEY_PROVIDERS: ApiKeyProviderSpec[] = [
+	{ id: "openai", displayName: "OpenAI (API key)", placeholder: "sk-..." },
+	{ id: "deepseek", displayName: "DeepSeek", placeholder: "sk-..." },
+	{ id: "mistral", displayName: "Mistral", placeholder: "..." },
+	{ id: "groq", displayName: "Groq", placeholder: "gsk_..." },
+	{ id: "xai", displayName: "xAI (API key)", placeholder: "xai-..." },
+	{ id: "google", displayName: "Google Gemini (API key)", placeholder: "AIza..." },
+	{ id: "openrouter", displayName: "OpenRouter", placeholder: "sk-or-..." },
+	{ id: "together", displayName: "Together AI", placeholder: "..." },
+	{ id: "fireworks", displayName: "Fireworks AI", placeholder: "fw_..." },
+	{ id: "cerebras", displayName: "Cerebras", placeholder: "csk-..." },
+	{ id: "moonshot", displayName: "Moonshot (Kimi)", placeholder: "sk-..." },
+	{ id: "zai", displayName: "Z.AI (GLM)", placeholder: "..." },
+	{ id: "minimax", displayName: "MiniMax (Global)", placeholder: "..." },
+	{ id: "minimax-cn", displayName: "MiniMax (China)", placeholder: "..." },
+];
 
 export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 	anthropic: {
@@ -280,16 +319,15 @@ export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 		},
 	},
 
-	minimax: {
-		displayName: "MiniMax (Global)",
-		apiKey: "$MINIMAX_API_KEY",
-	},
-
-	"minimax-cn": {
-		displayName: "MiniMax (China)",
-		apiKey: "$MINIMAX_CN_API_KEY",
-	},
 };
+
+for (const spec of API_KEY_PROVIDERS) {
+	PROVIDER_TEMPLATES[spec.id] = {
+		displayName: spec.displayName,
+		buildOAuth: (index: number) => buildApiKeyOAuth(spec.displayName, index, spec.placeholder),
+	};
+}
+
 
 export const SUPPORTED_PROVIDERS = Object.keys(PROVIDER_TEMPLATES);
 
@@ -353,7 +391,6 @@ export function registerSub(pi: ExtensionAPI, entry: SubEntry): void {
 	pi.registerProvider(name, {
 		baseUrl,
 		api: transportApi ?? builtinModels[0]?.api,
-		apiKey: template.apiKey,
 		streamSimple,
 		oauth: oauth && modifyModels ? { ...oauth, modifyModels } : oauth,
 		models,
