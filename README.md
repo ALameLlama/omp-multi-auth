@@ -99,7 +99,9 @@ Create `.omp/multi-auth.json` in a project to restrict which subscription provid
 
 API-key providers support full multi-account operation. Add an account with `/multi-auth add`, select the provider, then authenticate via `/multi-auth login` (or `/login <name>`) and paste your API key when prompted. Each account stores its own key independently in OMP auth storage.
 
-Cursor and GitLab Duo require custom handlers and are not exposed.
+- `cursor`: Cursor dashboard API keys (`crsr_...`/`cursor_...`) exchanged for short-lived session JWTs and automatically refreshed.
+
+GitLab Duo requires custom handlers and is not exposed.
 
 ## Built-in limits
 

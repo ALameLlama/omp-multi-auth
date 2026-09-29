@@ -88,6 +88,56 @@ export function buildApiKeyOAuth(displayName: string, index: number, placeholder
 	};
 }
 
+const CURSOR_EXCHANGE_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
+
+function cursorJwtExpiryMs(jwt: string): number {
+	const fallback = Date.now() + 55 * 60 * 1000;
+	const parts = jwt.split(".");
+	if (parts.length !== 3) return fallback;
+	try {
+		const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"))) as { exp?: number };
+		return typeof payload.exp === "number" ? payload.exp * 1000 : fallback;
+	} catch {
+		return fallback;
+	}
+}
+
+async function exchangeCursorApiKey(apiKey: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+	const resp = await fetch(CURSOR_EXCHANGE_URL, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+		body: "{}",
+		signal,
+	});
+	if (!resp.ok) {
+		const text = await resp.text().catch(() => "");
+		throw new Error(`Cursor API key exchange failed (${resp.status}): ${text || resp.statusText}`);
+	}
+	const data = (await resp.json()) as { accessToken?: string };
+	if (!data.accessToken) throw new Error("Cursor API key exchange returned no accessToken");
+	return { access: data.accessToken, refresh: apiKey, expires: cursorJwtExpiryMs(data.accessToken) };
+}
+
+export function buildCursorApiKeyOAuth(index: number): ProviderOAuth {
+	return {
+		name: `Cursor #${index}`,
+		async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+			const apiKey = (await callbacks.onPrompt({
+				message: "Paste your Cursor API key (crsr_...):",
+				placeholder: "crsr_...",
+			})).trim();
+			if (!apiKey) throw new Error(`No API key entered for Cursor #${index}`);
+			return exchangeCursorApiKey(apiKey);
+		},
+		async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+			return exchangeCursorApiKey(credentials.refresh || credentials.access);
+		},
+		getApiKey(credentials: OAuthCredentials): string {
+			return credentials.access;
+		},
+	};
+}
+
 
 
 // GitHub Copilot base URL derivation, ported from the pi-ai OAuth flow
@@ -316,6 +366,13 @@ export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 		displayName: "xAI Grok OAuth",
 		buildOAuth(index: number) {
 			return flowBackedOAuth("xai-oauth", `xAI Grok OAuth #${index}`);
+		},
+	},
+
+	cursor: {
+		displayName: "Cursor (API key)",
+		buildOAuth(index: number) {
+			return buildCursorApiKeyOAuth(index);
 		},
 	},
 
