@@ -77,7 +77,7 @@ Create `.omp/multi-auth.json` in a project to restrict which subscription provid
 | `google-antigravity` | Antigravity |
 | `kimi-code` | Kimi Code |
 | `xai-oauth` | xAI Grok OAuth |
-
+| `cursor` | Cursor (browser PKCE OAuth or API key) |
 ### API key
 
 | Provider | Service |
@@ -96,14 +96,13 @@ Create `.omp/multi-auth.json` in a project to restrict which subscription provid
 | `zai` | Z.AI (GLM) |
 | `minimax` | MiniMax (Global) |
 | `minimax-cn` | MiniMax (China) |
+| `cursor` | Cursor (dashboard API key `crsr_...` / `cursor_...` or browser sign-in) |
 
 API-key providers support full multi-account operation. Add an account with `/multi-auth add`, select the provider, then authenticate via `/multi-auth login` (or `/login <name>`) and paste your API key when prompted. Each account stores its own key independently in OMP auth storage.
 
-- `cursor`: Cursor dashboard API keys (`crsr_...`/`cursor_...`) exchanged for short-lived session JWTs and automatically refreshed.
+For `cursor`, `/multi-auth login` prompts for a dashboard API key (`crsr_...`/`cursor_...`). Submit a key to use token exchange, or leave it blank to sign in via browser PKCE OAuth. Both methods refresh automatically.
 
-GitLab Duo requires custom handlers and is not exposed.
-
-## Built-in limits
+## Built-in quotas
 
 Run `/multi-auth limits` to inspect quota and usage information for supported providers. This currently includes built-in quota checks for Codex and Google providers. Results depend on provider availability and authenticated account state.
 

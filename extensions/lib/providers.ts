@@ -118,19 +118,31 @@ async function exchangeCursorApiKey(apiKey: string, signal?: AbortSignal): Promi
 	return { access: data.accessToken, refresh: apiKey, expires: cursorJwtExpiryMs(data.accessToken) };
 }
 
-export function buildCursorApiKeyOAuth(index: number): ProviderOAuth {
+const CURSOR_API_KEY_PREFIXES = ["crsr_", "cursor_"];
+
+export function buildCursorOAuth(index: number): ProviderOAuth {
+	const definition = requireOAuthDefinition("cursor");
 	return {
 		name: `Cursor #${index}`,
 		async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 			const apiKey = (await callbacks.onPrompt({
-				message: "Paste your Cursor API key (crsr_...):",
-				placeholder: "crsr_...",
+				message: "Paste your Cursor API key (crsr_...), or leave blank to sign in with your browser:",
+				placeholder: "crsr_...  (blank = browser sign-in)",
+				allowEmpty: true,
 			})).trim();
-			if (!apiKey) throw new Error(`No API key entered for Cursor #${index}`);
-			return exchangeCursorApiKey(apiKey);
+			if (apiKey) return exchangeCursorApiKey(apiKey, callbacks.signal);
+			const credentials = await definition.login(callbacks);
+			if (typeof credentials === "string") {
+				throw new Error(`Cursor #${index} browser login did not return renewable credentials`);
+			}
+			return credentials;
 		},
-		async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-			return exchangeCursorApiKey(credentials.refresh || credentials.access);
+		async refreshToken(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
+			const refresh = credentials.refresh || credentials.access;
+			if (CURSOR_API_KEY_PREFIXES.some((prefix) => refresh.startsWith(prefix))) {
+				return exchangeCursorApiKey(refresh, signal);
+			}
+			return definition.refreshToken(credentials, signal);
 		},
 		getApiKey(credentials: OAuthCredentials): string {
 			return credentials.access;
@@ -370,9 +382,9 @@ export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 	},
 
 	cursor: {
-		displayName: "Cursor (API key)",
+		displayName: "Cursor",
 		buildOAuth(index: number) {
-			return buildCursorApiKeyOAuth(index);
+			return buildCursorOAuth(index);
 		},
 	},
 
