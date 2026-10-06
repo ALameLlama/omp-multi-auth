@@ -133,6 +133,10 @@ export function saveProjectConfig(cwd: string, config: ProjectConfig): void {
 }
 
 export function getProviderDisplayName(providerName: string, subscriptions: SubEntry[]): string {
+	const baseProvider = getBaseProvider(providerName);
+	if (baseProvider && providerName === `${baseProvider}-pool`) {
+		return `${PROVIDER_TEMPLATES[baseProvider].displayName} pool`;
+	}
 	const subEntry = subscriptions.find((entry) => subProviderName(entry) === providerName);
 	if (subEntry) {
 		return subDisplayName(subEntry);

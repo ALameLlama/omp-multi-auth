@@ -5,7 +5,9 @@ import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@oh-my-p
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth";
 import { AssistantMessageEventStream, streamSimple, type Api, type AssistantMessageEvent, type Context, type Model, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import { getModels, subProviderName, type SubEntry } from "./core.ts";
+import { createPoolResolver, poolProviderName, POOL_API_KEY, type PoolHostBinding } from "./pool.ts";
 
 export type CopilotCredentials = OAuthCredentials & { enterpriseUrl?: string };
 export type GeminiCredentials = OAuthCredentials & { projectId?: string };
@@ -409,6 +411,11 @@ export function subDisplayName(entry: SubEntry): string {
 export function getBaseProvider(providerName: string): string | undefined {
 	// Direct match
 	if (PROVIDER_TEMPLATES[providerName]) return providerName;
+	// Derived routes are recognized only for supported canonical families.
+	if (providerName.endsWith("-pool")) {
+		const base = providerName.slice(0, -"-pool".length);
+		if (PROVIDER_TEMPLATES[base]) return base;
+	}
 	// Strip trailing -N
 	const match = providerName.match(/^(.+)-(\d+)$/);
 	if (match && PROVIDER_TEMPLATES[match[1]]) return match[1];
@@ -419,23 +426,152 @@ export function getBaseProvider(providerName: string): string | undefined {
 // Model cloning
 // ==========================================================================
 
-export function cloneModels(originalProvider: string, index: number): ProviderModelConfig[] {
+function cloneProviderModels(originalProvider: string, nameSuffix: string, apiOverride?: Api): ProviderModelConfig[] {
 	const models = getModels(originalProvider);
 	return models.map((m) => ({
 		id: m.id,
-		name: `${m.name} (#${index})`,
-		api: SUB_TRANSPORT_CONFIG[originalProvider]?.customApiId ?? m.api,
+		name: `${m.name}${nameSuffix}`,
+		api: apiOverride ?? m.api,
+		baseUrl: m.baseUrl,
 		reasoning: m.reasoning,
 		thinking: m.thinking,
 		input: m.input as ("text" | "image")[],
+		// v18.6.2's runtime custom-model overlay accepts these native fields
+		// even though the public ProviderModelConfig declaration is narrower.
+		imageInputDecoder: m.imageInputDecoder,
+		tokenizer: m.tokenizer,
+		supportsTools: m.supportsTools,
+		promptCache: m.promptCache,
 		cost: { ...m.cost },
 		premiumMultiplier: m.premiumMultiplier,
 		contextWindow: m.contextWindow,
+		maxContextWindow: m.maxContextWindow,
 		maxTokens: m.maxTokens,
+		omitMaxOutputTokens: m.omitMaxOutputTokens,
 		preferWebsockets: m.preferWebsockets,
 		headers: m.headers ? { ...m.headers } : undefined,
 		compat: m.compat,
+		contextPromotionTarget: m.contextPromotionTarget,
+		compactionModel: m.compactionModel,
+		remoteCompaction: m.remoteCompaction,
 	}));
+}
+
+export function cloneModels(originalProvider: string, index: number): ProviderModelConfig[] {
+	return cloneProviderModels(originalProvider, ` (#${index})`, SUB_TRANSPORT_CONFIG[originalProvider]?.customApiId);
+}
+
+function poolApiId(baseProvider: string): Api {
+	return `${baseProvider}-multi-auth-pool`;
+}
+
+/**
+ * Fill registration-overlay omissions from the bundled reference while retaining
+ * the original physical selection's registry overrides. A derived model must
+ * never supply its marker header resolver. First confirm the pool model exists.
+ */
+export function getPoolModelForSelection(model: Model<Api>): Model<Api> | undefined {
+	const baseProvider = getBaseProvider(model.provider);
+	if (!baseProvider) return undefined;
+	const nativeModel = getModels(baseProvider).find(candidate => candidate.id === model.id);
+	if (!nativeModel) return undefined;
+	const physicalMetadata = model.provider === poolProviderName(baseProvider)
+		? undefined
+		: Object.fromEntries(Object.entries(model).filter(([, value]) => value !== undefined));
+	return {
+		...nativeModel,
+		...physicalMetadata,
+		provider: poolProviderName(baseProvider),
+		api: poolApiId(baseProvider),
+		name: `${nativeModel.name} (pool)`,
+	};
+}
+
+function createPoolStream(baseProvider: string, host: PoolHostBinding): SubscriptionStream {
+	return (model, context, options = {}) => {
+		const nativeModel = getModels(baseProvider).find(candidate => candidate.id === model.id);
+		if (!nativeModel) throw new Error(`Missing bundled model ${baseProvider}/${model.id}`);
+		const builtinApi = SUB_TRANSPORT_CONFIG[baseProvider]?.builtinApi ?? nativeModel.api;
+		const internalModel: Model<Api> = {
+			...nativeModel,
+			provider: baseProvider,
+			api: typeof builtinApi === "function" ? builtinApi(model.id) : builtinApi,
+		};
+		const resolver = createPoolResolver(host, baseProvider, model.id, options, memberModel => {
+			// This model belongs only to this request. Each native resolver attempt
+			// can install its member's transport without touching another stream.
+			internalModel.baseUrl = memberModel.baseUrl;
+			internalModel.headers = memberModel.headers;
+			internalModel.resolveHeaders = memberModel.resolveHeaders;
+			internalModel.compat = memberModel.compat;
+			internalModel.preferWebsockets = memberModel.preferWebsockets;
+		});
+		const internalOptions: SimpleStreamOptions = {
+			...options,
+			apiKey: resolver,
+			// The host may already have wrapped fetch for the derived provider.
+			// Put canonical proxy options on the request before that wrapper runs;
+			// native withProxyInit preserves these and genuine caller init.proxy.
+			// Keep the incoming fetch: its explicit-override provenance is opaque.
+			fetch: options.fetch ? wrapFetchForProxy(options.fetch, baseProvider) : undefined,
+			onPayload: async (payload, _nativeModel, signal) => {
+				const rewritten = baseProvider === "google-antigravity"
+					? rewriteAntigravitySystemInstruction(payload) : payload;
+				const replacement = await options.onPayload?.(rewritten, model, signal);
+				return replacement ?? rewritten;
+			},
+			onSseEvent: options.onSseEvent
+				? (event) => options.onSseEvent?.(event, model)
+				: undefined,
+			onResponse: options.onResponse
+				? (response, _nativeModel, signal) => options.onResponse?.(response, model, signal)
+				: undefined,
+		};
+		const inner = streamSimple(internalModel, context, internalOptions);
+		const outer = new AssistantMessageEventStream();
+		outer.forwardLocalWorkFrom(inner);
+		void (async () => {
+			try {
+				for await (const event of inner) {
+					outer.push(restoreSubscriptionProvider(event, model.provider));
+				}
+				if (!outer.done) outer.end({ ...(await inner.result()), provider: model.provider });
+			} catch (error) {
+				outer.fail(error);
+			}
+		})();
+		return outer;
+	};
+}
+
+/**
+ * Synchronize derived routes from the normalized merged physical subscriptions.
+ * Pools have a rowless dispatch marker, not OAuth/login accounts. Eligibility
+ * and exact-model project filtering remain request-time resolver decisions.
+ */
+export function registerProviderPools(pi: ExtensionAPI, entries: SubEntry[], host: PoolHostBinding): void {
+	const represented = new Set(entries.map(entry => entry.provider));
+	const existingProviders = new Set(host.registry?.getAll("all").map(model => model.provider) ?? []);
+	for (const baseProvider of SUPPORTED_PROVIDERS) {
+		const name = poolProviderName(baseProvider);
+		if (!represented.has(baseProvider)) {
+			if (existingProviders.has(name)) pi.unregisterProvider(name);
+			continue;
+		}
+		const nativeModels = getModels(baseProvider);
+		const api = poolApiId(baseProvider);
+		pi.registerProvider(name, {
+			baseUrl: nativeModels[0]?.baseUrl ?? "",
+			api,
+			apiKey: POOL_API_KEY,
+			authHeader: false,
+			// Child extension loading precedes its session binding. Do not replace
+			// the shared custom API with an unbound host during catalog refresh.
+			// The first bound session synchronizes again before any dispatch.
+			...(host.registry ? { streamSimple: createPoolStream(baseProvider, host) } : {}),
+			models: cloneProviderModels(baseProvider, " (pool)", api),
+		});
+	}
 }
 
 
