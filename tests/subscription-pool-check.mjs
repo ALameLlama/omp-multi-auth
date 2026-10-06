@@ -52,18 +52,28 @@ function createFixture(options = {}) {
   const rowIds = {};
   const tokens = {};
   const credentials = {};
+  const lifetimeMs = options.manualTui ? 86_400_000 : 3_600_000;
+  const expires = Date.now() + lifetimeMs;
   for (const [account, provider] of [["A", "openai-codex"], ["B", "openai-codex-2"]]) {
-    const claims = { exp: Math.floor(Date.now() / 1000) + 3600, "https://api.openai.com/auth": { chatgpt_account_id: `pool-account-${account.toLowerCase()}`, chatgpt_plan_type: "pro" }, "https://api.openai.com/profile": { email: `pool-${account.toLowerCase()}@example.invalid` } };
+    const claims = { exp: Math.floor(expires / 1000), "https://api.openai.com/auth": { chatgpt_account_id: `pool-account-${account.toLowerCase()}`, chatgpt_plan_type: "pro" }, "https://api.openai.com/profile": { email: `pool-${account.toLowerCase()}@example.invalid` } };
     const access = `${Buffer.from('{"alg":"none","typ":"JWT"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture`;
     tokens[account] = access;
-    credentials[provider] = { type: "oauth", access, refresh: `fixture-refresh-${account}`, expires: Date.now() + 3_600_000, accountId: `pool-account-${account.toLowerCase()}` };
+    credentials[provider] = { type: "oauth", access, refresh: `fixture-refresh-${account}`, expires, accountId: `pool-account-${account.toLowerCase()}` };
     if (options.omitAccounts?.includes(account)) continue;
-    rowIds[account] = Number(insert.run(provider, "oauth", JSON.stringify({ access, refresh: `fixture-refresh-${account}`, expires: Date.now() + 3_600_000, accountId: `pool-account-${account.toLowerCase()}` }), `fixture-${account}`).lastInsertRowid);
+    rowIds[account] = Number(insert.run(provider, "oauth", JSON.stringify(credentials[provider]), `fixture-${account}`).lastInsertRowid);
   }
   if (options.kimi) {
     for (const [account, provider] of [["A", "kimi-code"], ["B", "kimi-code-2"]]) rowIds[`kimi${account}`] = Number(insert.run(provider, "api_key", JSON.stringify({ key: `pool-kimi-${account.toLowerCase()}` }), null).lastInsertRowid);
   }
-  const externalClaims = { exp: Math.floor(Date.now() / 1000) + 3600, fixture_source: "pool-external-a", "https://api.openai.com/auth": { chatgpt_account_id: "pool-account-a", chatgpt_plan_type: "pro" } };
+  if (options.anthropic) {
+    for (const [account, provider] of [["A", "anthropic"], ["B", "anthropic-2"]]) {
+      const access = `sk-ant-oat01-fixture-pool-anthropic-${account.toLowerCase()}`;
+      tokens[`anthropic${account}`] = access;
+      credentials[provider] = { type: "oauth", access, refresh: `fixture-anthropic-refresh-${account}`, expires };
+      rowIds[`anthropic${account}`] = Number(insert.run(provider, "oauth", JSON.stringify(credentials[provider]), `fixture-anthropic-${account}`).lastInsertRowid);
+    }
+  }
+  const externalClaims = { exp: Math.floor(expires / 1000), fixture_source: "pool-external-a", "https://api.openai.com/auth": { chatgpt_account_id: "pool-account-a", chatgpt_plan_type: "pro" } };
   credentials.externalToken = `${Buffer.from('{"alg":"none","typ":"JWT"}').toString("base64url")}.${Buffer.from(JSON.stringify(externalClaims)).toString("base64url")}.external-fixture`;
   writeFileSync(env.POOL_FIXTURE_CREDENTIALS, JSON.stringify(credentials));
   db.close();
@@ -399,8 +409,63 @@ const transportCases = {
 };
 Object.assign(cases, transportCases);
 
+cases["anthropic-replay"] = async () => scenario("anthropic-replay", {
+  anthropic: true,
+  catalog: true,
+  subscriptions: [{ provider: "anthropic", index: 2, label: "Signed fixture B" }],
+}, async (host, fixture, models) => {
+  await host.command("/pool-fixture anthropic-replay");
+  const traces = fixture.traces();
+  const native = traces.find((entry) => entry.type === "anthropic-native-model");
+  assert.ok(native, "native signed Anthropic model was not selected");
+  assert.equal(native.provider, "anthropic");
+  assert.equal(native.api, "anthropic-messages");
+  assert.equal(native.reasoning, true);
+  assert.equal(native.signingEndpoint, true);
+  assert.ok(models.some((model) => model.provider === "anthropic-pool" && model.id === native.id), "real extension did not register the exact signed model pool");
+  assertAccount(fixture, ["A", "A", "B"]);
+  const calls = inference(fixture);
+  assert.equal(calls.length, 3, "native replay duplicated an inference request");
+  for (const call of calls) {
+    assert.equal(call.model, native.id, "Anthropic transport changed the exact canonical model ID");
+    assert.equal(call.token, `Bearer ${fixture.tokens[`anthropic${call.account}`]}`);
+    assert.equal(call.apiKey, null, "Anthropic OAuth must use bearer authentication");
+    assert.equal(call.anthropicVersion, "2023-06-01");
+  }
+  const results = traces.filter((entry) => entry.type === "anthropic-replay-result");
+  assert.deepEqual(results.map((entry) => entry.turn), [1, 2, 3]);
+  for (const [index, account] of ["A", "A", "B"].entries()) {
+    const result = results[index].result;
+    assertProvenance({ messages: [result] }, fixture.rowIds[`anthropic${account}`], `ANTHROPIC_REPLAY_${account}_${index + 1}`);
+    assert.equal(result.provider, "anthropic-pool");
+    assert.equal(result.api, "anthropic-messages");
+    assert.equal(result.model, native.id);
+    assert.equal(result.stopReason, "stop");
+    assert.deepEqual(result.content.filter((part) => part.type === "thinking").map((part) => ({ thinking: part.thinking, signature: part.thinkingSignature })), [{ thinking: `Fixture signed reasoning ${account}.`, signature: `fixture-signature-${account}` }]);
+  }
+  const contracts = traces.filter((entry) => entry.type === "anthropic-contract");
+  assert.deepEqual(contracts.map((entry) => [entry.step, entry.account, entry.error ?? null]), [[1, "A", null], [2, "A", null], [3, "B", null]]);
+  assert.deepEqual(contracts[1].signedBlocks.map((block) => ({ type: block.type, thinking: block.thinking, signature: block.signature })), [{ type: "thinking", thinking: "Fixture signed reasoning A.", signature: "fixture-signature-A" }]);
+  assert.deepEqual(contracts[2].signedBlocks, [], "native credential B replay retained foreign signed reasoning");
+  for (const contract of contracts) {
+    assert.ok(["enabled", "adaptive"].includes(contract.thinking.type));
+    assert.ok(Number.isInteger(contract.maxTokens) && contract.maxTokens > 1024 && contract.maxTokens <= native.maxTokens);
+  }
+  const removed = traces.find((entry) => entry.type === "anthropic-removed-A");
+  assert.ok(removed);
+  assert.ok(!removed.rows.some((row) => row.id === fixture.rowIds.anthropicA));
+  assert.ok(removed.rows.some((row) => row.id === fixture.rowIds.anthropicB && row.provider === "anthropic-2"));
+  const saved = traces.find((entry) => entry.type === "anthropic-saved-history");
+  const after = traces.find((entry) => entry.type === "anthropic-history-after");
+  assert.equal(after?.unchanged, true, "pool replay mutated original history");
+  assert.deepEqual(after.history, saved.history);
+  assert.equal(saved.history.messages[1].provider, "anthropic-pool");
+  assert.equal(saved.history.messages[1].credentialId, fixture.rowIds.anthropicA);
+  assert.equal(traces.filter((entry) => entry.type === "agent-end").length, 0, "direct native replay unexpectedly invoked or retried an agent turn");
+});
+
 if (keep) {
-  const fixture = createFixture();
+  const fixture = createFixture({ manualTui: true, env: { OMP_SKIP_SETUP: "1" } });
   const env = Object.entries(fixture.env);
   const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
   console.log(`Disposable fixture: ${fixture.dir}`);

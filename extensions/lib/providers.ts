@@ -487,6 +487,19 @@ export function getPoolModelForSelection(model: Model<Api>): Model<Api> | undefi
 	};
 }
 
+function restorePoolHistory(context: Context, logicalProvider: string, nativeProvider: string, nativeApi: Api): Context {
+	let messages: Context["messages"] | undefined;
+	for (let index = 0; index < context.messages.length; index++) {
+		const message = context.messages[index];
+		if (message.role !== "assistant" || message.provider !== logicalProvider || message.api !== nativeApi) continue;
+		// Only our own pool output returns to its native replay identity.
+		// Keep physical credential IDs so native signature ownership still applies.
+		messages ??= context.messages.slice();
+		messages[index] = { ...message, provider: nativeProvider };
+	}
+	return messages ? { ...context, messages } : context;
+}
+
 function createPoolStream(baseProvider: string, host: PoolHostBinding): SubscriptionStream {
 	return (model, context, options = {}) => {
 		const nativeModel = getModels(baseProvider).find(candidate => candidate.id === model.id);
@@ -527,7 +540,7 @@ function createPoolStream(baseProvider: string, host: PoolHostBinding): Subscrip
 				? (response, _nativeModel, signal) => options.onResponse?.(response, model, signal)
 				: undefined,
 		};
-		const inner = streamSimple(internalModel, context, internalOptions);
+		const inner = streamSimple(internalModel, restorePoolHistory(context, model.provider, baseProvider, internalModel.api), internalOptions);
 		const outer = new AssistantMessageEventStream();
 		outer.forwardLocalWorkFrom(inner);
 		void (async () => {

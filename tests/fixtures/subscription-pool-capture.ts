@@ -7,6 +7,7 @@ import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { join } from "node:path";
 import { handleSubsAdd, handleSubsStatus, removeSubscriptionEntry } from "../../extensions/lib/commands-subs.ts";
 import { loadEffectiveConfig, loadGlobalConfig, mergeConfigs, normalizeEntries, parseEnvConfig } from "../../extensions/lib/config.ts";
+import { getModels } from "../../extensions/lib/core.ts";
 import * as pool from "../../extensions/lib/pool.ts";
 import type { PoolHostBinding } from "../../extensions/lib/pool.ts";
 import * as providers from "../../extensions/lib/providers.ts";
@@ -115,13 +116,26 @@ function kimiResponse(text: string) {
   return events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
 }
 
+function anthropicResponse(model: string, text: string, selected: string) {
+  return frame("message_start", { message: { id: `anthropic_${++sequence}`, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } })
+    + frame("content_block_start", { index: 0, content_block: { type: "thinking", thinking: "" } })
+    + frame("content_block_delta", { index: 0, delta: { type: "thinking_delta", thinking: `Fixture signed reasoning ${selected}.` } })
+    + frame("content_block_delta", { index: 0, delta: { type: "signature_delta", signature: `fixture-signature-${selected}` } })
+    + frame("content_block_stop", { index: 0 })
+    + frame("content_block_start", { index: 1, content_block: { type: "text", text: "" } })
+    + frame("content_block_delta", { index: 1, delta: { type: "text_delta", text } })
+    + frame("content_block_stop", { index: 1 })
+    + frame("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 2 } })
+    + frame("message_stop", {});
+}
+
 function account(headers: Headers) {
   const identity = headers.get("chatgpt-account-id");
   if (identity === "pool-account-a") return "A";
   if (identity === "pool-account-b") return "B";
   const token = headers.get("x-api-key") ?? headers.get("authorization") ?? "";
-  if (token.includes("pool-kimi-a") || token.includes("pool-external-a")) return "A";
-  if (token.includes("pool-kimi-b")) return "B";
+  if (token.includes("pool-kimi-a") || token.includes("pool-external-a") || token.includes("sk-ant-oat01-fixture-pool-anthropic-a")) return "A";
+  if (token.includes("pool-kimi-b") || token.includes("sk-ant-oat01-fixture-pool-anthropic-b")) return "B";
   throw new Error(`fixture: unrecognized account identity at ${identity ?? "missing account header"}`);
 }
 
@@ -164,7 +178,8 @@ globalThis.fetch = async (input, init = {}) => {
   }
   const codex = /^(chatgpt\.com|api\.openai\.com)$/.test(url.hostname) && /\/responses$/.test(url.pathname);
   const kimi = /(^|\.)kimi\.(com|ai)$/.test(url.hostname) && /\/messages$/.test(url.pathname);
-  if (!codex && !kimi) {
+  const anthropic = url.hostname === "api.anthropic.com" && /\/messages$/.test(url.pathname);
+  if (!codex && !kimi && !anthropic) {
     trace({ type: "unexpected-fetch", url: url.href });
     throw new Error(`fixture forbids unexpected external URL: ${url.href}`);
   }
@@ -205,6 +220,22 @@ globalThis.fetch = async (input, init = {}) => {
     return new Response(stream, { headers: { "content-type": "text/event-stream" } });
   };
   const text = role === "auxiliary-title" ? `<title>POOL_RESPONSE_${selected}</title>` : preflight ? `Fixture task preflight for ${preflight}.` : child ? `${child === "DefaultPoolChild" ? "CHILD_DEFAULT" : "CHILD_NUMBERED"}_${selected}` : `${current.responsePrefix ?? "POOL_RESPONSE"}_${selected}`;
+  if (anthropic) {
+    const messages = Array.isArray(body?.messages) ? body.messages.filter(isObject) : [];
+    const step = Array.from(messages.filter((message) => message.role === "user").map((message) => JSON.stringify(message.content)).join(" ").matchAll(/ANTHROPIC_REPLAY_TURN_([123])/g)).at(-1)?.[1];
+    const assistantBlocks = messages.filter((message) => message.role === "assistant").flatMap((message) => Array.isArray(message.content) ? message.content.filter(isObject) : []);
+    const signedBlocks = assistantBlocks.filter((block) => block.type === "thinking" || block.type === "redacted_thinking");
+    const aThinking = signedBlocks.filter((block) => block.type === "thinking" && block.thinking === "Fixture signed reasoning A." && block.signature === "fixture-signature-A");
+    let error: string | undefined;
+    if (!step || !["enabled", "adaptive"].includes(String(isObject(body?.thinking) ? body.thinking.type : undefined))) error = "Expected native Anthropic reasoning request.";
+    else if (step === "1" && (selected !== "A" || assistantBlocks.length !== 0)) error = "First turn must use OAuth A without assistant history.";
+    else if (step === "2" && (selected !== "A" || aThinking.length !== 1 || signedBlocks.length !== 1)) error = "Fixture replay contract: authenticated A omitted original reasoning provenance.";
+    else if (step === "3" && (selected !== "B" || signedBlocks.length !== 0 || serialized.includes("fixture-signature-A"))) error = "Fixture replay contract: authenticated B received foreign A reasoning provenance.";
+    else if (step !== "1" && !assistantBlocks.some((block) => block.type === "text" && block.text === "ANTHROPIC_REPLAY_A_1")) error = "Fixture replay contract: original assistant answer was lost.";
+    trace({ type: "anthropic-contract", step: Number(step), account: selected, model: body?.model, thinking: body?.thinking, maxTokens: body?.max_tokens, assistantBlocks, signedBlocks, error });
+    if (error) return Response.json({ type: "error", error: { type: "invalid_request_error", message: error } }, { status: 400 });
+    return completeSseResponse(anthropicResponse(String(body?.model), `ANTHROPIC_REPLAY_${selected}_${step}`, selected));
+  }
   if (kimi) return completeSseResponse(kimiResponse(text));
   const tool = current.children && !child && !preflight && !serialized.includes('"type":"function_call_output"');
   const { frames, terminal } = responseFrames(text, tool, Boolean(child));
@@ -255,7 +286,44 @@ export default function capture(pi: ExtensionAPI) {
   pi.registerCommand("pool-fixture", { description: "Isolated pool regression fixture control", handler: async (args, ctx) => {
     const [action, ...rest] = args.trim().split(/\s+/);
     try {
-    if (action === "transport" || action === "unbound-factory") {
+    if (action === "anthropic-replay") {
+      const native = getModels("anthropic").find((model) => model.api === "anthropic-messages" && model.reasoning && model.compat?.signingEndpoint === true && (!model.requestModelId || model.requestModelId === model.id));
+      if (!native) throw new Error("fixture: native canonical signed Anthropic reasoning model missing");
+      const physical = ctx.modelRegistry.find("anthropic", native.id);
+      const logical = ctx.modelRegistry.find("anthropic-pool", native.id);
+      if (!physical || !logical) throw new Error(`fixture: configured Anthropic pool missing exact native model ${native.id}`);
+      const model = providers.getPoolModelForSelection(physical) ?? logical;
+      trace({ type: "anthropic-native-model", id: native.id, api: native.api, provider: native.provider, reasoning: native.reasoning, thinking: native.thinking, signingEndpoint: native.compat.signingEndpoint, maxTokens: native.maxTokens });
+      const user = (turn: number) => ({ role: "user" as const, content: [{ type: "text" as const, text: `ANTHROPIC_REPLAY_TURN_${turn}. Return the signed fixture response.` }], timestamp: Date.now() });
+      const firstUser = user(1);
+      const run = async (turn: number, messages: Parameters<typeof streamSimple>[1]["messages"]) => {
+        const stream = streamSimple(model, { messages }, {
+          apiKey: await ctx.modelRegistry.getApiKey(model, ctx.sessionManager.getSessionId()),
+          sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, fetch: globalThis.fetch,
+          reasoning: "medium", maxTokens: 2048,
+          onPayload(payload, callbackModel) {
+            pending.push({ type: "request-hook", kind: ctx.agent.kind, agentId: ctx.agent.id, sessionId: ctx.sessionManager.getSessionId(), provider: callbackModel?.provider, payload });
+            return payload;
+          },
+        });
+        const result = await stream.result();
+        trace({ type: "anthropic-replay-result", turn, result });
+        if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error(`fixture: Anthropic replay turn ${turn} failed: ${result.errorMessage ?? result.stopReason}`);
+        return result;
+      };
+      const first = await run(1, [firstUser]);
+      const history = { messages: [firstUser, first, user(2)] };
+      const originalHistory = JSON.stringify(history);
+      trace({ type: "anthropic-saved-history", history });
+      try {
+        await run(2, history.messages);
+        await ctx.modelRegistry.authStorage.credentials.remove("anthropic");
+        trace({ type: "anthropic-removed-A", rows: ctx.modelRegistry.authStorage.credentials.list().map((row) => ({ id: row.id, provider: row.provider })) });
+        await run(3, [firstUser, first, user(3)]);
+      } finally {
+        trace({ type: "anthropic-history-after", history, unchanged: JSON.stringify(history) === originalHistory });
+      }
+    } else if (action === "transport" || action === "unbound-factory") {
       const entries = normalizeEntries(mergeConfigs(loadGlobalConfig(), parseEnvConfig()));
       if (action === "unbound-factory") {
         // Exercise real registration before this new factory receives session_start.
