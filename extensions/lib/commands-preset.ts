@@ -8,6 +8,7 @@ import { loadGlobalConfig, saveGlobalConfig, findSelectableModelForProvider, par
 import { subDisplayName, getBaseProvider, SUPPORTED_PROVIDERS, PROVIDER_TEMPLATES } from "./providers.ts";
 import { showWrappedSelect } from "./ui.ts";
 import type { SelectItem } from "@oh-my-pi/pi-tui";
+import type { EnforceSelectedModel } from "../multi-auth.ts";
 
 export function formatPresetEntry(entry: PresetEntry): string {
 	const config = loadGlobalConfig();
@@ -133,7 +134,8 @@ export async function handlePresetList(ctx: ExtensionCommandContext): Promise<vo
 export async function handlePresetActivate(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
-	requestedName?: string,
+	requestedName: string | undefined,
+	enforceSelectedModel: EnforceSelectedModel,
 ): Promise<void> {
 	const config = loadGlobalConfig();
 	const envEntries = parseEnvConfig();
@@ -175,7 +177,11 @@ export async function handlePresetActivate(
 		const success = await pi.setModel(model);
 		if (!success) continue;
 
-		const prettyEntry = formatPresetEntryWith(entry, allSubs);
+		if (!await enforceSelectedModel(ctx, model)) return;
+		const selectedModel = ctx.models.current();
+		if (!selectedModel) return;
+
+		const prettyEntry = `${getProviderDisplayName(selectedModel.provider, allSubs)} / ${selectedModel.id}`;
 		ctx.ui.notify(`Preset "${preset.name}": switched to ${prettyEntry}`, "info");
 		ctx.ui.setStatus("multi-auth", `preset:${preset.name} | ${prettyEntry}`);
 		return;
@@ -244,6 +250,7 @@ export async function handlePresetToggle(ctx: ExtensionCommandContext): Promise<
 export async function handlePresetMenu(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
+	enforceSelectedModel: EnforceSelectedModel,
 ): Promise<void> {
 	const actions: SelectItem[] = [
 		{ value: "activate", label: "activate", description: "Switch to a preset's best available entry" },
@@ -267,7 +274,7 @@ export async function handlePresetMenu(
 		preferredAction = action;
 		switch (action) {
 			case "activate":
-				await handlePresetActivate(pi, ctx);
+				await handlePresetActivate(pi, ctx, undefined, enforceSelectedModel);
 				break;
 			case "create":
 				await handlePresetCreate(ctx);

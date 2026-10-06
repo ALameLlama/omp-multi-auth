@@ -8,6 +8,7 @@ import { getBaseProvider, subDisplayName, PROVIDER_TEMPLATES } from "./providers
 import { getAuthStorage, adaptAuthStorage, getModels, subProviderName, type AuthStorageEntry, type MultiAuthConfig, type QuotaAccount, type QuotaCheckResult, type QuotaStatusKind, type ProviderQuotaChecker, type AuthStorage } from "./core.ts";
 import { loadGlobalConfig, loadProjectConfig, parseEnvConfig, mergeConfigs, normalizeEntries } from "./config.ts";
 import { getWrappedSelectIndex, showWrappedSelect } from "./ui.ts";
+import { getPoolStatus, poolProviderName, POOL_RESERVE_PERCENT } from "./pool.ts";
 import type { SelectItem } from "@oh-my-pi/pi-tui";
 
 export const DEFAULT_CODEX_USAGE_BASE_URL = "https://chatgpt.com/backend-api";
@@ -1203,6 +1204,7 @@ export async function handleSubsLimits(ctx: ExtensionCommandContext): Promise<vo
 }
 
 export const QUOTA_STATUS_KEY = "multi-auth-quota";
+export const POOL_STATUS_KEY = "multi-auth-pool";
 
 export function formatCurrentModelQuota(
 	result: QuotaCheckResult,
@@ -1297,26 +1299,47 @@ export function invalidateStatusQuota(providerName: string): void {
 
 export function refreshQuotaStatusLine(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
-	const model = ctx.model;
+	const model = ctx.models.current();
 	if (!model) {
 		ctx.ui.setStatus(QUOTA_STATUS_KEY, undefined);
+		ctx.ui.setStatus(POOL_STATUS_KEY, undefined);
 		return;
 	}
 	const base = getBaseProvider(model.provider);
+	if (base && model.provider === poolProviderName(base)) {
+		// Command contexts retain their selected-model snapshot; the coordinator
+		// must look up membership and quota for the live selection instead.
+		const pool = getPoolStatus({
+			...ctx,
+			model,
+			modelRegistry: ctx.modelRegistry,
+			sessionManager: ctx.sessionManager,
+		});
+		ctx.ui.setStatus(
+			POOL_STATUS_KEY,
+			pool
+				? `${pool.baseProvider} pool | ${pool.activeProviderName ?? "pending"} | ${pool.memberNames.length} accounts | ${POOL_RESERVE_PERCENT}% headroom`
+				: undefined,
+		);
+		const quota = pool?.activeProviderName && pool.quota?.account.providerName === pool.activeProviderName
+			? pool.quota
+			: undefined;
+		ctx.ui.setStatus(QUOTA_STATUS_KEY, quota ? formatCurrentModelQuota(quota, model) : undefined);
+		return;
+	}
+	ctx.ui.setStatus(POOL_STATUS_KEY, undefined);
 	if (!base || !PROVIDER_QUOTA_CHECKERS.some((c) => c.baseProvider === base)) {
 		ctx.ui.setStatus(QUOTA_STATUS_KEY, undefined);
 		return;
 	}
 
 	const cached = statusQuotaCache.get(model.provider);
-	if (cached) {
-		ctx.ui.setStatus(QUOTA_STATUS_KEY, formatCurrentModelQuota(cached.result, model) ?? undefined);
-	}
+	ctx.ui.setStatus(QUOTA_STATUS_KEY, cached ? formatCurrentModelQuota(cached.result, model) : undefined);
 	if (!cached || Date.now() - cached.at > STATUS_QUOTA_TTL_MS) {
 		fetchStatusQuotaResult(ctx, model.provider, base).then((result) => {
-			if (!result) return;
-			if (ctx.model?.provider === model.provider && ctx.model) {
-				ctx.ui.setStatus(QUOTA_STATUS_KEY, formatCurrentModelQuota(result, ctx.model) ?? undefined);
+			const currentModel = ctx.models.current();
+			if (currentModel?.provider === model.provider && currentModel.id === model.id) {
+				ctx.ui.setStatus(QUOTA_STATUS_KEY, result ? formatCurrentModelQuota(result, currentModel) : undefined);
 			}
 		});
 	}
