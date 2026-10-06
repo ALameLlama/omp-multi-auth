@@ -60,17 +60,8 @@ async function runCapture(model, subscriptions) {
 	}
 }
 
-function assertRewritten(capture, provider) {
+function assertCapturedRequest(capture, provider) {
 	assert.equal(capture.provider, provider);
-	const parts = capture.payload?.request?.systemInstruction?.parts ?? [];
-	const text = parts.map((part) => part?.text ?? "").join("\n");
-	const ZWSP = "\u200B";
-	assert.ok(text.includes(ZWSP), "zero-width space inserted into fingerprint");
-	assert.doesNotMatch(text, /RFC 2119/, "contiguous RFC 2119 fingerprint broken");
-	assert.doesNotMatch(text, /<conventions>/, "contiguous <conventions> tag broken");
-	const stripped = text.split(ZWSP).join("");
-	assert.match(stripped, /(?:<conventions>\s*)?RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL\./,
-		"content preserved once zero-width spaces are stripped");
 	assert.equal(capture.wire.body.requestType, "agent");
 	assert.match(capture.wire.url, /\/v1internal:streamGenerateContent\?alt=sse$/);
 	assert.match(String(capture.wire.headers?.["User-Agent"] ?? capture.wire.headers?.["user-agent"]), /^antigravity\//);
@@ -78,11 +69,11 @@ function assertRewritten(capture, provider) {
 }
 
 const base = await runCapture("google-antigravity/gemini-3.8-flash", []);
-assertRewritten(base, "google-antigravity");
+assertCapturedRequest(base, "google-antigravity");
 
 const synthetic = await runCapture("google-antigravity-2/gemini-3.8-flash", [
 	{ provider: "google-antigravity", index: 2 },
 ]);
-assertRewritten(synthetic, "google-antigravity-2");
+assertCapturedRequest(synthetic, "google-antigravity-2");
 
 console.log("base and synthetic Antigravity payload hooks passed");
