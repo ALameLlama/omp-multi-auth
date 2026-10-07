@@ -6,7 +6,7 @@ import { handleSubsMenu, handleSubsList, handleSubsAdd, handleSubsRemove, handle
 import { handleSubsLimits, refreshQuotaStatusLine, invalidateStatusQuota } from "./lib/quota.ts";
 import { handlePresetActivate, handlePresetCreate, handlePresetList, handlePresetToggle, handlePresetRemove, handlePresetMenu } from "./lib/commands-preset.ts";
 import { getAuthStorage, subProviderName } from "./lib/core.ts";
-import { bindPoolSession, createPoolHostBinding, listPoolMemberNames, poolProviderName, preferPoolMember, setPoolStatusCallback, unbindPoolSession } from "./lib/pool.ts";
+import { bindPoolSession, createPoolHostBinding, getPoolMemberPin, listPoolMemberNames, pinPoolMember, poolProviderName, preferPoolMember, setPoolStatusCallback, unbindPoolSession } from "./lib/pool.ts";
 
 export type EnforceSelectedModel = (
 	ctx: ExtensionContext | ExtensionCommandContext,
@@ -111,6 +111,14 @@ export default function multiSub(pi: ExtensionAPI) {
 			}
 
 			if (!selectedModel || !baseProvider) return true;
+
+			// An explicit physical pin wins over automatic pool promotion. Keep
+			// the pinned account selected; clear a stale pin only when the live
+			// selection moved off it (another physical account or the pool).
+			const pinned = getPoolMemberPin(ctx);
+			if (pinned && pinned === selectedModel.provider && !isPool) return true;
+			if (pinned && (isPool || pinned !== selectedModel.provider)) pinPoolMember(ctx, undefined);
+
 			if (isPool) {
 				const members = await listPoolMemberNames(ctx, baseProvider, selectedModel.id);
 				if (!ctx.modelRegistry.find(poolProviderName(baseProvider), selectedModel.id)) {

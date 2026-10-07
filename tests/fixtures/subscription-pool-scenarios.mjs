@@ -349,14 +349,18 @@ export function createScenarios(api) {
     await respond(host, fixture, "A");
     const start = fixture.traces().length;
     await host.command("/multi-auth switch openai-codex-2");
-    const state = await pooledState(host);
-    assert.equal(state.thinkingLevel, "xhigh", "subscription switch changed the selected thinking level");
-    const notices = fixture.traces().slice(start).filter((entry) => entry.type === "notification");
-    const notice = notices.find((entry) => /pool/i.test(entry.message));
-    assert.ok(notice, "subscription switch did not explain that the final model remains pooled");
-    assert.ok(!/\bpinned\b|locked to|only (?:use|uses|using)/i.test(notice.message), "switch falsely promised a permanently pinned physical account");
-    await respond(host, fixture, "A");
-    assertAccount(fixture, ["A", "A"]);
+    const state = await host.send("get_state");
+    assert.equal(state.success, true, JSON.stringify(state));
+    assert.equal(state.data.thinkingLevel, "xhigh", "subscription switch changed the selected thinking level");
+    assert.equal(state.data.model.provider, "openai-codex-2", "physical switch was re-promoted to the pool instead of pinning");
+    assert.equal(state.data.model.id, "gpt-5.5", "subscription switch changed the selected model");
+    const notice = fixture.traces().slice(start).find((entry) => entry.type === "notification" && /switched/i.test(entry.message));
+    assert.ok(notice, "subscription switch did not confirm the new physical selection");
+    const result = await host.prompt("Return the fixture response.");
+    assertProvenance(result, fixture.rowIds.B, "POOL_RESPONSE_B");
+    const final = assistantMessages(result).at(-1);
+    assert.equal(final.provider, "openai-codex-2", "pinned physical selection lost its physical provider identity");
+    assertAccount(fixture, ["A", "B"]);
   });
 
   return cases;

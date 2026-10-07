@@ -9,7 +9,7 @@ import { PROVIDER_TEMPLATES, SUPPORTED_PROVIDERS, getBaseProvider, subDisplayNam
 import { handleSubsLimits, invalidateStatusQuota, refreshQuotaStatusLine } from "./quota.ts";
 import { showWrappedSelect } from "./ui.ts";
 import type { SelectItem } from "@oh-my-pi/pi-tui";
-import { evictPoolMember, getPoolStatus, listPoolMemberNames, poolProviderName, POOL_RESERVE_PERCENT, type PoolHostBinding } from "./pool.ts";
+import { evictPoolMember, getPoolStatus, listPoolMemberNames, pinPoolMember, poolProviderName, POOL_RESERVE_PERCENT, type PoolHostBinding } from "./pool.ts";
 import type { EnforceSelectedModel } from "../multi-auth.ts";
 
 function refreshCommandStatus(ctx: ExtensionCommandContext): void {
@@ -144,6 +144,10 @@ export async function handleSubsSwitch(
 		ctx.ui.notify(`Subscription not available for switching: ${providerName}`, "error");
 		return;
 	}
+
+	// Switching to a physical account pins it (no automatic pool promotion);
+	// switching to the pool clears any pin.
+	pinPoolMember(ctx, selected.providerName.endsWith("-pool") ? undefined : selected.providerName);
 
 	const currentModel = ctx.models.current();
 	const nextModel = await resolveSwitchTargetModel(ctx, selected.providerName, currentModel?.id);
@@ -580,7 +584,7 @@ export async function handleSubsStatus(ctx: ExtensionCommandContext): Promise<vo
 		const members = [...memberNames].map(name => `${name} (${getProviderDisplayName(name, all)})`).join(", ") || "none";
 		lines.push(`${providerName} | ${memberNames.size} permitted/authenticated accounts | ${members} | active: ${activeProviderName ?? "pending"} | ${POOL_RESERVE_PERCENT}% soft headroom`);
 		if (baseProvider === "openai-codex") {
-			lines.push(`${providerName} | native Code Mode and /fast controls are unsupported`);
+			lines.push(`  ↳ note: native Code Mode and /fast controls are unsupported`);
 		}
 	}
 

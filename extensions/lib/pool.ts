@@ -47,6 +47,8 @@ interface SessionBinding {
 	raw: RawAuthStorage;
 	manager: PoolContext["sessionManager"];
 	preferred?: string;
+	/** Physical provider explicitly pinned by the user; suppresses pool promotion. */
+	pinned?: string;
 	notify: PoolContext["ui"]["notify"];
 	refreshStatus?: () => void;
 }
@@ -179,6 +181,7 @@ export function bindPoolSession(ctx: PoolContext, host: PoolHostBinding): void {
 		raw: ctx.modelRegistry.authStorage,
 		manager: ctx.sessionManager,
 		preferred: previous?.preferred ?? (ctx.model?.provider.endsWith("-pool") ? undefined : ctx.model?.provider),
+		pinned: previous?.pinned,
 		notify: ctx.ui.notify.bind(ctx.ui),
 		refreshStatus: previous?.refreshStatus,
 	});
@@ -193,6 +196,19 @@ export function unbindPoolSession(sessionId: string): void {
 export function preferPoolMember(ctx: PoolContext, providerName: string): void {
 	const binding = sessions.get(ctx.sessionManager.getSessionId());
 	if (binding?.registry === ctx.modelRegistry && !providerName.endsWith("-pool")) binding.preferred = providerName;
+}
+
+/** Pin this session to one physical provider (no pool promotion) or clear the pin. */
+export function pinPoolMember(ctx: PoolContext, providerName: string | undefined): void {
+	const binding = sessions.get(ctx.sessionManager.getSessionId());
+	if (binding?.registry === ctx.modelRegistry) {
+		binding.pinned = providerName && !providerName.endsWith("-pool") ? providerName : undefined;
+	}
+}
+
+export function getPoolMemberPin(ctx: PoolContext): string | undefined {
+	const binding = sessions.get(ctx.sessionManager.getSessionId());
+	return binding?.registry === ctx.modelRegistry ? binding.pinned : undefined;
 }
 
 export function setPoolStatusCallback(ctx: PoolContext, callback: (() => void) | undefined): void {
@@ -405,8 +421,17 @@ function unavailable(raw: RawAuthStorage, member: RequestMember, modelId: string
 		if (failure > Date.now()) return true;
 		member.state.failures.delete(model);
 	}
-	return blocksFor(raw, member.resolved).some(block => !block.blockScope || block.blockScope === "auth"
-		|| block.blockScope === "account-policy" || block.blockScope === `model-policy:${model}`);
+	// A native block marks this credential unusable unless its scope is a
+	// model-specific policy for a different model. OMP uses provider-owned
+	// scopes for rate limits (Codex: "chat"/"spark"/"shared") alongside the
+	// generic "auth"/"account-policy" scopes; all of them must park the account.
+	// Only `model-policy:<id>` is per-model, and only blocks the requested model.
+	return blocksFor(raw, member.resolved).some(block => {
+		const scope = block.blockScope;
+		if (!scope) return true;
+		if (scope.startsWith("model-policy:")) return scope === `model-policy:${model}`;
+		return true;
+	});
 }
 
 function memberCurrent(policy: RoutingPolicy, baseProvider: string, modelId: string, member: RequestMember): boolean {

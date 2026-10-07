@@ -31,7 +31,9 @@ omp install git:github.com/tuandinh0801/omp-multi-auth
 
 When a provider has an extra configured subscription, the extension registers a `<provider>-pool` route. Two authenticated physical accounts activate automatic pooling. Existing canonical and numbered selections keep the same model ID. Saved agent roles and presets do not change.
 
-OMP's model picker and RPC model selection enter the pool before the next normal prompt. `/multi-auth switch` and preset activation enter it immediately. Pool routes are not login accounts. Continue to use physical names such as `openai-codex` and `openai-codex-2` for authentication.
+OMP's model picker and RPC model selection enter the pool before the next normal prompt. Preset activation enters it immediately. Pool routes are not login accounts. Continue to use physical names such as `openai-codex` and `openai-codex-2` for authentication.
+
+`/multi-auth switch <pool>` selects the pool and clears any pin. `/multi-auth switch <physical>` pins that physical account: subsequent prompts use it directly instead of being re-promoted to the pool, until you switch again. This is how you force a specific account (for example, when the other account is rate-limited).
 
 The main agent and subagents share the active account within the same permitted account group. The pool keeps that account while its measured quota exceeds 15%, or its quota is unknown. At 15% or below, new requests select an account with more quota. If every usable account is low, the pool uses the account with the most remaining quota.
 
@@ -59,7 +61,7 @@ Pooled Anthropic requests use the standard native streaming transport. They do n
 | `/multi-auth remove` | Remove an account |
 | `/multi-auth login` | Authenticate an account |
 | `/multi-auth logout` | Sign out an account |
-| `/multi-auth switch` | Select an account/provider or pool |
+| `/multi-auth switch` | Select an account/provider or pool (physical selection pins it) |
 | `/multi-auth status` | Show physical accounts and pool routing status |
 | `/multi-auth limits` | Check provider quota and usage |
 
